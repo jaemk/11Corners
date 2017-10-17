@@ -1,71 +1,124 @@
+#!/usr/bin/env python
 
-#convert geojson data (composed of LineString or MultLineString features) to network graph
+"""
+Convert geojson data (composed of LineString or MultLineString features)
+to network graph of feature points and neighbors
+"""
+
 import json
-from pprint import pprint
+import itertools
+from collections import defaultdict
 from math import sqrt
 
-ac = 'psu_roads/AC/ac_geo_coords.json'
 
-#read in data from geojson file with LineString features
-with open(ac) as data_file:    
-    data = json.load(data_file)
-collecting_dict = {}
-print( "Number of features in this data set:", len(data['features']) )
+def load_json_input(data_file_name='psu_roads/AC/ac_geo_coords.json'):
+    with open(data_file_name, 'r') as data_file:
+        return json.load(data_file)
 
-count = 0
 
-for i in range(0,len(data['features'])):
-  
-	if data['features'][i]['geometry']['type'] == 'LineString':
-		points_in_line = data['features'][i]['geometry']['coordinates']
-	#flatten MultiLineString features so they become a LineString
-	if data['features'][i]['geometry']['type'] != 'LineString':
-		points_in_line = [item for sublist in data['features'][i]['geometry']['coordinates'] for item in sublist]
-		count += 1
-	
-	for p in range(len(points_in_line)):	
-		#assign current point in LineString, this will we node ID
-		this_point = tuple( points_in_line[p] )
-		#assign previous and next points in linestring, edges will connect current point to these nodes
-		if (p > 0):
-			prev_point = tuple(points_in_line[p-1])
-			prev_point_dist = sqrt( (this_point[0] - prev_point[0])**2 + (this_point[1] - prev_point[1])**2 )
-			prev_point_obj = {"end": prev_point, "dist": prev_point_dist}
-		else:
-			prev_point = None
+def write_json_to_file(data, out_file_name='ac_network_geo_coords.json'):
+    with open(out_file_name, 'w') as out_file:
+        json.dump(data, out_file)
 
-		if p < (len( points_in_line) -1):
-			next_point = tuple(points_in_line[p+1])
-			next_point_dist = sqrt( (this_point[0] - next_point[0])**2 + (this_point[1] - next_point[1])**2 )
-			next_point_obj = {"end": next_point, "dist": next_point_dist}
-		else:
-			next_point = None
-		
-		#add new node to network graph or add new edges to existing node
-		if str(this_point) not in collecting_dict:
-			collecting_dict[str(this_point)] = []
-			if prev_point != None: collecting_dict[str(this_point)].append(prev_point_obj)
-			if next_point != None: collecting_dict[str(this_point)].append(next_point_obj)
-		else: 
-			if prev_point not in collecting_dict[str(this_point)] and prev_point != None: collecting_dict[str(this_point)].append(prev_point_obj)
-			if next_point not in collecting_dict[str(this_point)] and next_point != None: collecting_dict[str(this_point)].append(next_point_obj)
 
-print( "count", count)
+def point_distance(a, b):
+    """Euclidean point distance"""
+    return sqrt(
+                (a[0] - b[0])**2 + (a[1] - b[1])**2
+            )
 
-#sanity check
-big_points = 0
-total = 0
-for i in collecting_dict:	
-	total += 1
-	try:
-		if len( collecting_dict[i] ) > 2:
-			big_points += 1
-	except:
-		print(i)
-		pass
-print("total " , total) 
-print("big_points ", big_points)
 
-#read dictionary out to json file
-with open('ac_network_geo_coords.json', 'w') as outfile:
-    json.dump(collecting_dict, outfile)
+def collect_feature_points(data):
+    """
+    For each feature,
+        - grab all point coords
+        - save associated neighbors if multiple points exist
+        - record points and neighbors
+
+    return structure
+        {
+            (1.0, 2.0): [
+                # list of neighbors
+                {
+                    'prev': {
+                        'coord': (0.0, 1.0),
+                        'dist': 1.0,
+                    },
+                    'next': {
+                        'coord': (3.0, 3.0),
+                        'dist': 2.0,
+                    },
+                },
+            ],
+            (2.0, 1.0): [
+                ...
+            ],
+        }
+    """
+    feature_points = defaultdict(list)
+    non_line_string_count = 0
+    for feature in data['features'].values():
+        if feature['geometry']['type'] == 'LineString':
+            line_points = feature['geometry']['coordinates']
+        else:
+            # flatten MultiLineString coordinates so they become a LineString
+            # [
+            #   [
+            #     [1, 2],
+            #     [2, 1],
+            #   ],
+            #   [
+            #     [1 ,3],
+            #     [3, 1],
+            #   ],
+            # ]
+            # into: [ [1, 2], [2, 1], [1, 3], [3, 1] ]
+            coords = feature['geometry']['coordinates']
+            line_points = list(itertools.chain(*feature['geometry']['coordinates']))
+            non_line_string_count += 1
+
+        n_points = len(line_points)
+        for index in range(n_points):
+            point   = tuple(line_points[index])
+            prev    = tuple(line_points[index-1]) if index > 0 else None
+            next_   = tuple(line_points[index+1]) if index < (n_points - 1) else None
+
+            if prev is not None:
+                dist = point_distance(point, prev)
+                prev = {'coord': prev, 'dist': dist}
+
+            if next_ is not None:
+                dist = point_distance(point, next_)
+                next_ = {'coord': next_, 'dist': dist}
+
+            neighbors = {'prev': prev, 'next': next_}
+
+            feature_points[point].append(neighbors)
+
+    return feature_points, non_line_string_count
+
+
+def sanity_check(data):
+    big_points = 0
+    for key, val in data.items():
+        if len(val) > 1:
+            big_points += 1
+        else:
+            print("Found more than 1 set of neighbors for: {}".format(key))
+
+    print("Total points: {}".format(len(data)))
+    print("big_points: {}".format(big_points))
+
+
+def main():
+    data = load_json_input()
+    print("Number of features in this data set: {}".format(len(data['features'])))
+    feature_points, non_line_string_count = collect_feature_points(data)
+    print("Number of non-lineString features: {}".format(non_line_string_count))
+    sanity_check(feature_points)
+    write_json_to_file(feature_points)
+
+
+if __name__ == '__main__':
+    main()
+
